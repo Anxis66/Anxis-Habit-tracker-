@@ -3,8 +3,8 @@ import { useState, useEffect, useMemo, useCallback } from 'react';
 const HABITS = [
   { key: 'Water (3L)', label: '3L water', icon: '💧' },
   { key: 'Sleep (7+ hrs)', label: '7+ hours sleep', icon: '😴' },
-  { key: 'Protein Goal', label: 'Hit protein goal', icon: '🍗' },
-  { key: 'Steps (5k+)', label: '5k+ steps', icon: '🚶' },
+  { key: 'Protein Goal', label: 'Hit protein/calorie goal', icon: '🍗' },
+  { key: 'Steps (5k+)', label: '5k+ steps/cardio', icon: '🚶' },
 ];
 const TARGET = 3; // hit at least 3/4 daily
 
@@ -139,8 +139,10 @@ export default function HabitTracker() {
     [records]
   );
 
+  const isFutureDate = selectedDate > todayISO;
+
   const toggleHabit = async (habitKey) => {
-    if (!memberName || saving) return;
+    if (!memberName || saving || isFutureDate) return;
     setSaving(true);
     setError('');
     const currentVal = !!selectedFields[habitKey];
@@ -304,6 +306,7 @@ export default function HabitTracker() {
             const score = scoreForRecord(rec?.fields);
             const isSelected = iso === selectedDate;
             const isToday = iso === todayISO;
+            const isFuture = iso > todayISO;
             let bg = 'transparent';
             let textColor = 'var(--text-secondary)';
             if (score === HABITS.length) {
@@ -319,11 +322,15 @@ export default function HabitTracker() {
             return (
               <button
                 key={iso}
-                onClick={() => setSelectedDate(iso)}
+                onClick={() => { if (!isFuture) setSelectedDate(iso); }}
+                disabled={isFuture}
+                title={isFuture ? "You can't log a day that hasn't happened yet" : undefined}
                 style={{
                   ...styles.dayCell,
                   background: bg,
-                  color: textColor,
+                  color: isFuture ? 'var(--text-muted)' : textColor,
+                  opacity: isFuture ? 0.35 : 1,
+                  cursor: isFuture ? 'not-allowed' : 'pointer',
                   border: isSelected
                     ? '2px solid var(--text-primary)'
                     : isToday
@@ -365,6 +372,9 @@ export default function HabitTracker() {
           </span>
         </div>
 
+        {isFutureDate ? (
+          <p style={styles.futureLockNote}>You can't log a day that hasn't happened yet — come back on the day.</p>
+        ) : (
         <div style={{ marginTop: 14, display: 'flex', flexDirection: 'column', gap: 10 }}>
           {HABITS.map((h) => {
             const checked = !!selectedFields[h.key];
@@ -372,7 +382,7 @@ export default function HabitTracker() {
               <button
                 key={h.key}
                 onClick={() => toggleHabit(h.key)}
-                disabled={saving}
+                disabled={saving || isFutureDate}
                 style={{
                   ...styles.habitRow,
                   borderColor: checked ? 'var(--accent)' : 'var(--border)',
@@ -394,8 +404,9 @@ export default function HabitTracker() {
             );
           })}
         </div>
+        )}
 
-        {selectedScore >= TARGET && (
+        {!isFutureDate && selectedScore >= TARGET && (
           <p style={styles.hitTarget}>Target hit for the day. Nice work.</p>
         )}
       </section>
@@ -601,6 +612,7 @@ const styles = {
     flexShrink: 0,
   },
   hitTarget: { marginTop: 14, fontSize: 13, color: 'var(--accent)', fontWeight: 500 },
+  futureLockNote: { marginTop: 14, fontSize: 13, color: 'var(--text-muted)', fontStyle: 'italic' },
   weeklyLabel: { fontSize: 13, fontWeight: 600, color: 'var(--text-secondary)' },
   weeklySub: { fontSize: 15, fontWeight: 600, marginTop: 4 },
   textarea: {
