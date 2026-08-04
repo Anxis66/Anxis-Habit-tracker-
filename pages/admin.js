@@ -45,6 +45,8 @@ export default function AdminDashboard() {
   const [selectedMember, setSelectedMember] = useState(null);
   const [passcode, setPasscode] = useState('');
   const [unlocked, setUnlocked] = useState(false);
+  const [authError, setAuthError] = useState('');
+  const [checkingAuth, setCheckingAuth] = useState(false);
 
   useEffect(() => {
     if (typeof window !== 'undefined' && window.sessionStorage.getItem('anxis_admin_unlocked') === '1') {
@@ -119,12 +121,28 @@ export default function AdminDashboard() {
           <p style={styles.gateEyebrow}>Anxis</p>
           <h1 style={styles.gateTitle}>Admin dashboard</h1>
           <form
-            onSubmit={(e) => {
+            onSubmit={async (e) => {
               e.preventDefault();
-              // Lightweight gate, not real auth — swap for something stronger before scaling admin access.
-              if (passcode.trim().length > 0) {
-                window.sessionStorage.setItem('anxis_admin_unlocked', '1');
-                setUnlocked(true);
+              if (!passcode.trim() || checkingAuth) return;
+              setCheckingAuth(true);
+              setAuthError('');
+              try {
+                const res = await fetch('/api/admin-auth', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ passcode }),
+                });
+                const data = await res.json();
+                if (res.ok && data.ok) {
+                  window.sessionStorage.setItem('anxis_admin_unlocked', '1');
+                  setUnlocked(true);
+                } else {
+                  setAuthError(data.error || 'Incorrect passcode.');
+                }
+              } catch (e) {
+                setAuthError('Could not verify passcode. Try again.');
+              } finally {
+                setCheckingAuth(false);
               }
             }}
             style={{ display: 'flex', gap: 8, marginTop: 20 }}
@@ -137,10 +155,13 @@ export default function AdminDashboard() {
               placeholder="Admin passcode"
               style={styles.input}
             />
-            <button type="submit" style={styles.primaryBtn}>Enter</button>
+            <button type="submit" disabled={checkingAuth} style={{ ...styles.primaryBtn, opacity: checkingAuth ? 0.6 : 1 }}>
+              {checkingAuth ? 'Checking…' : 'Enter'}
+            </button>
           </form>
+          {authError && <p style={styles.authError}>{authError}</p>}
           <p style={styles.gateNote}>
-            This is a soft gate for v1 — anyone with the link and a passcode gets in. Fine for a small trusted team; upgrade before wide rollout.
+            Admin-only. Don&apos;t share this link outside your team.
           </p>
         </div>
       </div>
@@ -281,6 +302,7 @@ const styles = {
   gateEyebrow: { fontSize: 12, letterSpacing: 1, textTransform: 'uppercase', color: 'var(--accent)', fontWeight: 600 },
   gateTitle: { fontSize: 22, fontWeight: 700, marginTop: 8 },
   gateNote: { fontSize: 12, color: 'var(--text-muted)', marginTop: 16, lineHeight: 1.5 },
+  authError: { fontSize: 13, color: 'var(--red)', marginTop: 12 },
   input: {
     flex: 1,
     background: 'var(--surface-raised)',
