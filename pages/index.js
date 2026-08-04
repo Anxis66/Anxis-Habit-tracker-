@@ -3,8 +3,8 @@ import { useState, useEffect, useMemo, useCallback } from 'react';
 const HABITS = [
   { key: 'Water (3L)', label: '3L water', icon: '💧' },
   { key: 'Sleep (7+ hrs)', label: '7+ hours sleep', icon: '😴' },
-  { key: 'Protein Goal', label: 'Hit protein/calorie goal', icon: '🍗' },
-  { key: 'Steps (5k+)', label: '5k+ steps/cardio', icon: '🚶' },
+  { key: 'Protein Goal', label: 'Protein / calorie goal', icon: '🍗' },
+  { key: 'Steps (5k+)', label: '5k+ steps / cardio', icon: '🚶' },
 ];
 const TARGET = 3; // hit at least 3/4 daily
 
