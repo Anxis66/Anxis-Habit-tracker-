@@ -22,7 +22,8 @@ function startOfWeekMonday(d) {
   date.setDate(date.getDate() + diff);
   date.setHours(0, 0, 0, 0);
   return date;
-}
+} 
+
 function startOfWeekSunday(d) {
   const date = new Date(d);
   const day = date.getDay();
@@ -221,10 +222,21 @@ export default function HabitTracker() {
     }
   };
 
-  useEffect(() => {
-    setNonNegotiableDraft(selectedFields['Weekly Non-Negotiable'] || '');
+    useEffect(() => {
+    const weekStart = startOfWeekSunday(new Date(selectedDate + 'T00:00:00'));
+    const weekStartISO = toISODate(weekStart);
+    const weekEnd = new Date(weekStart);
+    weekEnd.setDate(weekEnd.getDate() + 6);
+    const weekEndISO = toISODate(weekEnd);
+
+    const weekRecord = Object.entries(records).find(
+      ([date, rec]) =>
+        date >= weekStartISO && date <= weekEndISO && rec.fields['Weekly Non-Negotiable']
+    );
+
+    setNonNegotiableDraft(weekRecord ? weekRecord[1].fields['Weekly Non-Negotiable'] : '');
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedDate]);
+  }, [selectedDate, records]);
 
   // ---- Calendar grid ----
   const calendarCells = useMemo(() => {
