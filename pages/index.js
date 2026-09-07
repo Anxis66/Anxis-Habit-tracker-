@@ -23,7 +23,13 @@ function startOfWeekMonday(d) {
   date.setHours(0, 0, 0, 0);
   return date;
 }
-
+function startOfWeekSunday(d) {
+  const date = new Date(d);
+  const day = date.getDay();
+  date.setDate(date.getDate() - day);
+  date.setHours(0, 0, 0, 0);
+  return date;
+}
 function scoreForRecord(fields) {
   if (!fields) return 0;
   return HABITS.reduce((sum, h) => sum + (fields[h.key] ? 1 : 0), 0);
