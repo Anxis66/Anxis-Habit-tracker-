@@ -207,7 +207,7 @@ export default function HabitTracker() {
         if (!res.ok) throw new Error(data.error);
         setRecords((prev) => ({ ...prev, [selectedDate]: { id: data.record.id, fields: data.record.fields } }));
       }
-      setNonNegotiableDraft('');
+
     } catch (e) {
       setError('Could not save your non-negotiable. Try again.');
     } finally {
