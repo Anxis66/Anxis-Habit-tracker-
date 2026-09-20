@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useCallback } from 'react';
 
 const HABITS = [
   { key: 'Water (3L)', label: '3L water', icon: '💧' },
@@ -6,12 +6,7 @@ const HABITS = [
   { key: 'Protein Goal', label: 'Protein / calorie goal', icon: '🍗' },
   { key: 'Steps (5k+)', label: '5k+ steps / cardio', icon: '🚶' },
 ];
-const TARGET = 3;
-
-function scoreForRecord(fields) {
-  if (!fields) return 0;
-  return HABITS.reduce((sum, h) => sum + (fields[h.key] ? 1 : 0), 0);
-}
+const TARGET = 3; // hit at least 3/4 daily
 
 function toISODate(d) {
   const yr = d.getFullYear();
@@ -20,272 +15,423 @@ function toISODate(d) {
   return `${yr}-${mo}-${da}`;
 }
 
-function daysAgoISO(n) {
-  const d = new Date();
-  d.setDate(d.getDate() - n);
-  return toISODate(d);
+function startOfWeekMonday(d) {
+  const date = new Date(d);
+  const day = date.getDay();
+  const diff = (day === 0 ? -6 : 1) - day;
+  date.setDate(date.getDate() + diff);
+  date.setHours(0, 0, 0, 0);
+  return date;
 }
 
-function computeStreak(dates) {
-  const hitSet = new Set(dates);
-  let cursor = new Date();
-  if (!hitSet.has(toISODate(cursor))) cursor.setDate(cursor.getDate() - 1);
+function scoreForRecord(fields) {
+  if (!fields) return 0;
+  return HABITS.reduce((sum, h) => sum + (fields[h.key] ? 1 : 0), 0);
+}
+
+function computeStreaks(recordsByDate) {
+  const dates = Object.keys(recordsByDate)
+    .filter((d) => scoreForRecord(recordsByDate[d]) >= TARGET)
+    .sort();
+  if (dates.length === 0) return { current: 0, best: 0 };
+
+  let best = 1;
+  let run = 1;
+  for (let i = 1; i < dates.length; i++) {
+    const prev = new Date(dates[i - 1]);
+    const cur = new Date(dates[i]);
+    const diffDays = Math.round((cur - prev) / 86400000);
+    if (diffDays === 1) {
+      run += 1;
+    } else {
+      run = 1;
+    }
+    best = Math.max(best, run);
+  }
+
+  const todaysISO = toISODate(new Date());
+  let cursor = new Date(todaysISO);
   let current = 0;
+  const hitSet = new Set(dates);
+  if (!hitSet.has(toISODate(cursor))) {
+    cursor.setDate(cursor.getDate() - 1);
+  }
   while (hitSet.has(toISODate(cursor))) {
     current += 1;
     cursor.setDate(cursor.getDate() - 1);
   }
-  return current;
+
+  return { current, best };
 }
 
-// Normalize a name for grouping/matching: trim + lowercase. This is the fix —
-// "TOSIN", "tosin", and "Tosin" all collapse into one member instead of
-// three separate profiles.
-function normalizeName(name) {
-  return (name || '').trim().toLowerCase();
-}
-
-export default function AdminDashboard() {
-  const [allRecords, setAllRecords] = useState([]);
-  const [loading, setLoading] = useState(true);
+export default function HabitTracker() {
+  const [memberName, setMemberName] = useState(null);
+  const [nameInput, setNameInput] = useState('');
+  const [records, setRecords] = useState({});
+  const [loading, setLoading] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [viewMonth, setViewMonth] = useState(() => {
+    const d = new Date();
+    return new Date(d.getFullYear(), d.getMonth(), 1);
+  });
+  const [selectedDate, setSelectedDate] = useState(() => toISODate(new Date()));
+  const [nonNegotiableDraft, setNonNegotiableDraft] = useState('');
   const [error, setError] = useState('');
-  const [selectedMember, setSelectedMember] = useState(null);
-  const [passcode, setPasscode] = useState('');
-  const [unlocked, setUnlocked] = useState(false);
-  const [authError, setAuthError] = useState('');
-  const [checkingAuth, setCheckingAuth] = useState(false);
 
   useEffect(() => {
-    if (typeof window !== 'undefined' && window.sessionStorage.getItem('anxis_admin_unlocked') === '1') {
-      setUnlocked(true);
+    const stored = typeof window !== 'undefined' ? window.localStorage.getItem('anxis_member_name') : null;
+    if (stored) setMemberName(stored);
+  }, []);
+
+  const loadRecords = useCallback(async (name) => {
+    setLoading(true);
+    setError('');
+    try {
+      const res = await fetch(`/api/habits?member=${encodeURIComponent(name)}`);
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Could not load your data.');
+      const map = {};
+      for (const rec of data.records || []) {
+        const dateVal = rec.fields['Date'];
+        if (dateVal) map[dateVal] = { id: rec.id, fields: rec.fields };
+      }
+      setRecords(map);
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setLoading(false);
     }
   }, []);
 
   useEffect(() => {
-    if (!unlocked) return;
-    (async () => {
-      setLoading(true);
-      setError('');
-      try {
-        const res = await fetch('/api/habits');
+    if (memberName) loadRecords(memberName);
+  }, [memberName, loadRecords]);
+
+  const handleNameSubmit = (e) => {
+    e.preventDefault();
+    const trimmed = nameInput.trim();
+    if (!trimmed) return;
+    window.localStorage.setItem('anxis_member_name', trimmed);
+    setMemberName(trimmed);
+  };
+
+  const switchMember = () => {
+    window.localStorage.removeItem('anxis_member_name');
+    setMemberName(null);
+    setNameInput('');
+    setRecords({});
+  };
+
+  const todayISO = toISODate(new Date());
+  const selectedRecord = records[selectedDate];
+  const selectedFields = selectedRecord?.fields || {};
+  const selectedScore = scoreForRecord(selectedFields);
+  const isFutureDate = selectedDate > todayISO;
+
+  const { current: currentStreak, best: bestStreak } = useMemo(
+    () => computeStreaks(records),
+    [records]
+  );
+
+  const daysTracked = useMemo(
+    () => Object.values(records).filter((r) => scoreForRecord(r.fields) > 0).length,
+    [records]
+  );
+
+  const toggleHabit = async (habitKey) => {
+    if (!memberName || saving || isFutureDate) return;
+    setSaving(true);
+    setError('');
+    const currentVal = !!selectedFields[habitKey];
+    const nextFields = { ...selectedFields, [habitKey]: !currentVal };
+    setRecords((prev) => ({
+      ...prev,
+      [selectedDate]: { id: selectedRecord?.id, fields: { ...nextFields, 'Member Name': memberName, Date: selectedDate } },
+    }));
+
+    try {
+      if (selectedRecord?.id) {
+        const res = await fetch('/api/habits', {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ recordId: selectedRecord.id, fields: { [habitKey]: !currentVal } }),
+        });
         const data = await res.json();
-        if (!res.ok) throw new Error(data.error || 'Could not load data.');
-        setAllRecords(data.records || []);
-      } catch (e) {
-        setError(e.message);
-      } finally {
-        setLoading(false);
+        if (!res.ok) throw new Error(data.error);
+      } else {
+        const res = await fetch('/api/habits', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            fields: { 'Member Name': memberName, Date: selectedDate, [habitKey]: true },
+          }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error);
+        setRecords((prev) => ({ ...prev, [selectedDate]: { id: data.record.id, fields: data.record.fields } }));
       }
-    })();
-  }, [unlocked]);
-
-  // Group by normalized name, but remember the most recent display casing
-  // the member actually typed, so the UI still shows "Tosin" not "tosin".
-  const byMember = useMemo(() => {
-    const map = {};
-    for (const rec of allRecords) {
-      const rawName = rec.fields['Member Name'];
-      if (!rawName || !rawName.trim()) continue;
-      const key = normalizeName(rawName);
-      if (!map[key]) map[key] = { displayName: rawName.trim(), records: [] };
-      map[key].records.push(rec);
-      // Prefer the casing from the most recently dated entry as the display name
-      const currentLatest = map[key].records.reduce((a, b) => (a.fields.Date > b.fields.Date ? a : b));
-      map[key].displayName = currentLatest.fields['Member Name'].trim();
+    } catch (e) {
+      setError('Could not save that check. Try again.');
+      loadRecords(memberName);
+    } finally {
+      setSaving(false);
     }
-    return map;
-  }, [allRecords]);
+  };
 
-  const memberSummaries = useMemo(() => {
-    const last7 = daysAgoISO(6);
-    return Object.entries(byMember)
-      .map(([key, { displayName, records: recs }]) => {
-        const sorted = [...recs].sort((a, b) => (a.fields.Date < b.fields.Date ? 1 : -1));
-        const lastEntry = sorted[0];
-        const hitDates = recs.filter((r) => scoreForRecord(r.fields) >= TARGET).map((r) => r.fields.Date);
-        const streak = computeStreak(hitDates);
-        const last7Recs = recs.filter((r) => r.fields.Date >= last7);
-        const weeklyAvg =
-          last7Recs.length > 0
-            ? (last7Recs.reduce((s, r) => s + scoreForRecord(r.fields), 0) / last7Recs.length).toFixed(1)
-            : '0.0';
-        const daysSinceLastEntry = lastEntry
-          ? Math.round((new Date(toISODate(new Date())) - new Date(lastEntry.fields.Date)) / 86400000)
-          : null;
-        return { key, name: displayName, streak, weeklyAvg, daysSinceLastEntry, lastEntry, totalDays: recs.length, records: sorted };
-      })
-      .sort((a, b) => (a.daysSinceLastEntry ?? 999) - (b.daysSinceLastEntry ?? 999));
-  }, [byMember]);
+  const saveNonNegotiable = async () => {
+    if (!memberName || !nonNegotiableDraft.trim()) return;
+    setSaving(true);
+    try {
+      if (selectedRecord?.id) {
+        const res = await fetch('/api/habits', {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ recordId: selectedRecord.id, fields: { 'Weekly Non-Negotiable': nonNegotiableDraft } }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error);
+        setRecords((prev) => ({ ...prev, [selectedDate]: { id: data.record.id, fields: data.record.fields } }));
+      } else {
+        const res = await fetch('/api/habits', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            fields: { 'Member Name': memberName, Date: selectedDate, 'Weekly Non-Negotiable': nonNegotiableDraft },
+          }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error);
+        setRecords((prev) => ({ ...prev, [selectedDate]: { id: data.record.id, fields: data.record.fields } }));
+      }
+      setNonNegotiableDraft('');
+    } catch (e) {
+      setError('Could not save your non-negotiable. Try again.');
+    } finally {
+      setSaving(false);
+    }
+  };
 
-  const topStats = useMemo(() => {
-    const totalMembers = memberSummaries.length;
-    const avgStreak = totalMembers
-      ? (memberSummaries.reduce((s, m) => s + m.streak, 0) / totalMembers).toFixed(1)
-      : '0.0';
-    const activeToday = memberSummaries.filter((m) => m.daysSinceLastEntry === 0).length;
-    const slacking = memberSummaries.filter((m) => (m.daysSinceLastEntry ?? 999) >= 3).length;
-    return { totalMembers, avgStreak, activeToday, slacking };
-  }, [memberSummaries]);
+  useEffect(() => {
+    setNonNegotiableDraft(selectedFields['Weekly Non-Negotiable'] || '');
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedDate]);
 
-  if (!unlocked) {
+  const calendarCells = useMemo(() => {
+    const year = viewMonth.getFullYear();
+    const month = viewMonth.getMonth();
+    const first = new Date(year, month, 1);
+    const startOffset = (first.getDay() + 6) % 7;
+    const daysInMonth = new Date(year, month + 1, 0).getDate();
+    const cells = [];
+    for (let i = 0; i < startOffset; i++) cells.push(null);
+    for (let d = 1; d <= daysInMonth; d++) cells.push(new Date(year, month, d));
+    return cells;
+  }, [viewMonth]);
+
+  const monthLabel = viewMonth.toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
+
+  if (!memberName) {
     return (
       <div style={styles.gate}>
         <div style={styles.gateCard}>
           <p style={styles.gateEyebrow}>Anxis</p>
-          <h1 style={styles.gateTitle}>Admin dashboard</h1>
-          <form
-            onSubmit={async (e) => {
-              e.preventDefault();
-              if (!passcode.trim() || checkingAuth) return;
-              setCheckingAuth(true);
-              setAuthError('');
-              try {
-                const res = await fetch('/api/admin-auth', {
-                  method: 'POST',
-                  headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify({ passcode }),
-                });
-                const data = await res.json();
-                if (res.ok && data.ok) {
-                  window.sessionStorage.setItem('anxis_admin_unlocked', '1');
-                  setUnlocked(true);
-                } else {
-                  setAuthError(data.error || 'Incorrect passcode.');
-                }
-              } catch (e) {
-                setAuthError('Could not verify passcode. Try again.');
-              } finally {
-                setCheckingAuth(false);
-              }
-            }}
-            style={{ display: 'flex', gap: 8, marginTop: 20 }}
-          >
+          <h1 style={styles.gateTitle}>Habit and mindset tracker</h1>
+          <p style={styles.gateSub}>Enter your name to see your streak and today&apos;s check-in.</p>
+          <form onSubmit={handleNameSubmit} style={{ display: 'flex', gap: 8, marginTop: 20 }}>
             <input
               autoFocus
-              type="password"
-              value={passcode}
-              onChange={(e) => setPasscode(e.target.value)}
-              placeholder="Admin passcode"
+              value={nameInput}
+              onChange={(e) => setNameInput(e.target.value)}
+              placeholder="Your name"
               style={styles.input}
             />
-            <button type="submit" disabled={checkingAuth} style={{ ...styles.primaryBtn, opacity: checkingAuth ? 0.6 : 1 }}>
-              {checkingAuth ? 'Checking…' : 'Enter'}
-            </button>
+            <button type="submit" style={styles.primaryBtn}>Continue</button>
           </form>
-          {authError && <p style={styles.authError}>{authError}</p>}
-          <p style={styles.gateNote}>Admin-only. Don&apos;t share this link outside your team.</p>
         </div>
-      </div>
-    );
-  }
-
-  if (selectedMember) {
-    const m = memberSummaries.find((x) => x.key === selectedMember);
-    return (
-      <div style={styles.page}>
-        <button onClick={() => setSelectedMember(null)} style={styles.backBtn}>← All members</button>
-        <h1 style={styles.h1}>{m.name}</h1>
-        <section style={styles.statsRow}>
-          <StatCard icon="🔥" value={m.streak} label="Current streak" />
-          <StatCard icon="📊" value={m.weeklyAvg} label="7-day avg" />
-          <StatCard icon="📅" value={m.totalDays} label="Days logged" />
-        </section>
-
-        <section style={styles.card}>
-          <p style={styles.sectionLabel}>Recent entries</p>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 10 }}>
-            {m.records.slice(0, 14).map((r) => {
-              const score = scoreForRecord(r.fields);
-              return (
-                <div key={r.id} style={styles.entryRow}>
-                  <span style={{ fontSize: 13, color: 'var(--text-secondary)' }}>{r.fields.Date}</span>
-                  <span
-                    style={{
-                      fontSize: 12,
-                      fontWeight: 600,
-                      color: score >= TARGET ? 'var(--accent)' : 'var(--text-muted)',
-                    }}
-                  >
-                    {score}/{HABITS.length}
-                  </span>
-                </div>
-              );
-            })}
-          </div>
-        </section>
-
-        <section style={styles.card}>
-          <p style={styles.sectionLabel}>Weekly non-negotiables</p>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginTop: 10 }}>
-            {m.records
-              .filter((r) => r.fields['Weekly Non-Negotiable'])
-              .slice(0, 5)
-              .map((r) => (
-                <div key={r.id} style={styles.nnCard}>
-                  <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>{r.fields.Date}</span>
-                  <p style={{ fontSize: 14, marginTop: 4 }}>{r.fields['Weekly Non-Negotiable']}</p>
-                </div>
-              ))}
-            {m.records.filter((r) => r.fields['Weekly Non-Negotiable']).length === 0 && (
-              <p style={{ fontSize: 13, color: 'var(--text-muted)' }}>No non-negotiables logged yet.</p>
-            )}
-          </div>
-        </section>
       </div>
     );
   }
 
   return (
     <div style={styles.page}>
-      <p style={styles.eyebrow}>Anxis · admin</p>
-      <h1 style={styles.h1}>Habit tracker overview</h1>
+      <header style={styles.header}>
+        <div>
+          <p style={styles.eyebrow}>Anxis · habit tracker</p>
+          <h1 style={styles.h1}>Hey {memberName}</h1>
+        </div>
+        <button onClick={switchMember} style={styles.ghostBtn}>Not you?</button>
+      </header>
 
       {error && <div style={styles.errorBar}>{error}</div>}
-      {loading && <p style={styles.loadingText}>Loading…</p>}
 
-      {!loading && (
-        <>
-          <section style={styles.statsRow}>
-            <StatCard icon="👥" value={topStats.totalMembers} label="Members tracked" />
-            <StatCard icon="🔥" value={topStats.avgStreak} label="Avg streak" />
-            <StatCard icon="✅" value={topStats.activeToday} label="Checked in today" />
-            <StatCard icon="⚠️" value={topStats.slacking} label="3+ days quiet" />
-          </section>
+      <section style={styles.statsRow}>
+        <StatCard icon="🔥" value={currentStreak} label="Current streak" />
+        <StatCard icon="🏆" value={bestStreak} label="Best streak" />
+        <StatCard icon="📅" value={daysTracked} label="Days tracked" />
+      </section>
 
-          <section style={styles.card}>
-            <p style={styles.sectionLabel}>Members</p>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 10 }}>
-              {memberSummaries.map((m) => {
-                const isQuiet = (m.daysSinceLastEntry ?? 999) >= 3;
-                return (
-                  <button key={m.key} onClick={() => setSelectedMember(m.key)} style={styles.memberRow}>
-                    <div>
-                      <p style={{ fontSize: 14, fontWeight: 600 }}>{m.name}</p>
-                      <p style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 2 }}>
-                        {m.daysSinceLastEntry === 0
-                          ? 'Checked in today'
-                          : m.daysSinceLastEntry === 1
-                          ? 'Last check-in: yesterday'
-                          : m.daysSinceLastEntry === null
-                          ? 'No entries yet'
-                          : `Last check-in: ${m.daysSinceLastEntry} days ago`}
-                      </p>
-                    </div>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                      {isQuiet && <span style={styles.warnBadge}>Slacking</span>}
-                      <span style={{ fontSize: 13, color: 'var(--text-secondary)' }}>🔥 {m.streak}</span>
-                      <span style={{ color: 'var(--text-muted)' }}>›</span>
-                    </div>
-                  </button>
-                );
-              })}
-              {memberSummaries.length === 0 && (
-                <p style={{ fontSize: 13, color: 'var(--text-muted)' }}>No members have checked in yet.</p>
-              )}
-            </div>
-          </section>
-        </>
-      )}
+      <section style={styles.card}>
+        <div style={styles.calHeader}>
+          <button
+            style={styles.navBtn}
+            onClick={() => setViewMonth((m) => new Date(m.getFullYear(), m.getMonth() - 1, 1))}
+          >
+            ‹
+          </button>
+          <span style={styles.calTitle}>{monthLabel}</span>
+          <button
+            style={styles.navBtn}
+            onClick={() => setViewMonth((m) => new Date(m.getFullYear(), m.getMonth() + 1, 1))}
+          >
+            ›
+          </button>
+        </div>
+
+        <div style={styles.weekDays}>
+          {['M', 'T', 'W', 'T', 'F', 'S', 'S'].map((d, i) => (
+            <span key={i} style={styles.weekDayLabel}>{d}</span>
+          ))}
+        </div>
+
+        <div style={styles.grid}>
+          {calendarCells.map((date, i) => {
+            if (!date) return <div key={i} />;
+            const iso = toISODate(date);
+            const rec = records[iso];
+            const score = scoreForRecord(rec?.fields);
+            const isSelected = iso === selectedDate;
+            const isToday = iso === todayISO;
+            const isFuture = iso > todayISO;
+            let bg = 'transparent';
+            let textColor = 'var(--text-secondary)';
+            if (score === HABITS.length) {
+              bg = 'var(--accent)';
+              textColor = '#06231a';
+            } else if (score >= TARGET) {
+              bg = 'var(--accent-dim)';
+              textColor = 'var(--accent)';
+            } else if (score > 0) {
+              bg = 'var(--amber-dim)';
+              textColor = 'var(--amber)';
+            }
+            return (
+              <button
+                key={iso}
+                onClick={() => { if (!isFuture) setSelectedDate(iso); }}
+                disabled={isFuture}
+                title={isFuture ? "You can't log a day that hasn't happened yet" : undefined}
+                style={{
+                  ...styles.dayCell,
+                  background: bg,
+                  color: isFuture ? 'var(--text-muted)' : textColor,
+                  opacity: isFuture ? 0.35 : 1,
+                  cursor: isFuture ? 'not-allowed' : 'pointer',
+                  border: isSelected
+                    ? '2px solid var(--text-primary)'
+                    : isToday
+                    ? '1px solid var(--border-strong)'
+                    : '1px solid transparent',
+                }}
+              >
+                {date.getDate()}
+              </button>
+            );
+          })}
+        </div>
+
+        <div style={styles.legend}>
+          <LegendDot color="var(--accent)" label={`${HABITS.length}/${HABITS.length}`} />
+          <LegendDot color="var(--accent-dim)" textColor="var(--accent)" label={`${TARGET}-${HABITS.length - 1}/${HABITS.length}`} />
+          <LegendDot color="var(--amber-dim)" textColor="var(--amber)" label={`1-${TARGET - 1}/${HABITS.length}`} />
+          <LegendDot color="transparent" label="None" bordered />
+        </div>
+      </section>
+
+      <section style={styles.card}>
+        <div style={styles.dayHeaderRow}>
+          <span style={styles.dayHeaderTitle}>
+            {new Date(selectedDate + 'T00:00:00').toLocaleDateString('en-US', {
+              weekday: 'long',
+              month: 'short',
+              day: 'numeric',
+            })}
+          </span>
+          <span
+            style={{
+              ...styles.scoreBadge,
+              color: selectedScore >= TARGET ? 'var(--accent)' : 'var(--text-secondary)',
+              background: selectedScore >= TARGET ? 'var(--accent-dim)' : 'var(--surface-raised)',
+            }}
+          >
+            {selectedScore}/{HABITS.length}
+          </span>
+        </div>
+
+        {isFutureDate ? (
+          <p style={styles.futureLockNote}>You can't log a day that hasn't happened yet — come back on the day.</p>
+        ) : (
+        <div style={{ marginTop: 14, display: 'flex', flexDirection: 'column', gap: 10 }}>
+          {HABITS.map((h) => {
+            const checked = !!selectedFields[h.key];
+            return (
+              <button
+                key={h.key}
+                onClick={() => toggleHabit(h.key)}
+                disabled={saving || isFutureDate}
+                style={{
+                  ...styles.habitRow,
+                  borderColor: checked ? 'var(--accent)' : 'var(--border)',
+                  opacity: saving ? 0.6 : 1,
+                }}
+              >
+                <span
+                  style={{
+                    ...styles.checkbox,
+                    background: checked ? 'var(--accent)' : 'transparent',
+                    borderColor: checked ? 'var(--accent)' : 'var(--border-strong)',
+                  }}
+                >
+                  {checked && <CheckIcon />}
+                </span>
+                <span style={{ fontSize: 18 }}>{h.icon}</span>
+                <span style={{ fontSize: 15, fontWeight: 500 }}>{h.label}</span>
+              </button>
+            );
+          })}
+        </div>
+        )}
+
+        {!isFutureDate && selectedScore >= TARGET && (
+          <p style={styles.hitTarget}>Target hit for the day. Nice work.</p>
+        )}
+      </section>
+
+      <section style={styles.card}>
+        <p style={styles.weeklyLabel}>
+          Weekly non-negotiable — week of {toISODate(startOfWeekMonday(new Date(selectedDate + 'T00:00:00')))}
+        </p>
+        <p style={styles.weeklySub}>What&apos;s the one thing you have to hit this week?</p>
+        <textarea
+          value={nonNegotiableDraft}
+          onChange={(e) => setNonNegotiableDraft(e.target.value)}
+          placeholder="e.g. Train 4x this week, no matter what"
+          rows={3}
+          style={styles.textarea}
+        />
+        <button
+          onClick={saveNonNegotiable}
+          disabled={saving || !nonNegotiableDraft.trim()}
+          style={{ ...styles.primaryBtn, marginTop: 10, opacity: saving ? 0.6 : 1 }}
+        >
+          Save
+        </button>
+      </section>
+
+      {loading && <p style={styles.loadingText}>Loading your data…</p>}
+
+      <footer style={styles.footer}>
+        <a href="/admin" style={styles.adminLink}>Admin dashboard →</a>
+      </footer>
     </div>
   );
 }
@@ -293,15 +439,46 @@ export default function AdminDashboard() {
 function StatCard({ icon, value, label }) {
   return (
     <div style={styles.statCard}>
-      <span style={{ fontSize: 18 }}>{icon}</span>
+      <span style={{ fontSize: 20 }}>{icon}</span>
       <span style={styles.statValue}>{value}</span>
       <span style={styles.statLabel}>{label}</span>
     </div>
   );
 }
 
+function LegendDot({ color, textColor, label, bordered }) {
+  return (
+    <span style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: 'var(--text-muted)' }}>
+      <span
+        style={{
+          width: 12,
+          height: 12,
+          borderRadius: 4,
+          background: color,
+          border: bordered ? '1px solid var(--border-strong)' : 'none',
+        }}
+      />
+      {label}
+    </span>
+  );
+}
+
+function CheckIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#06231a" strokeWidth="3">
+      <path d="M20 6L9 17l-5-5" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
 const styles = {
-  gate: { minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24 },
+  gate: {
+    minHeight: '100vh',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: 24,
+  },
   gateCard: {
     maxWidth: 380,
     width: '100%',
@@ -310,9 +487,15 @@ const styles = {
     borderRadius: 'var(--radius)',
     padding: '32px 28px',
   },
-  gateEyebrow: { fontSize: 12, letterSpacing: 1, textTransform: 'uppercase', color: 'var(--accent)', fontWeight: 600 },
-  gateTitle: { fontSize: 22, fontWeight: 700, marginTop: 8 },
-  gateNote: { fontSize: 12, color: 'var(--text-muted)', marginTop: 16, lineHeight: 1.5 },
+  gateEyebrow: {
+    fontSize: 12,
+    letterSpacing: 1,
+    textTransform: 'uppercase',
+    color: 'var(--accent)',
+    fontWeight: 600,
+  },
+  gateTitle: { fontSize: 24, fontWeight: 700, marginTop: 8 },
+  gateSub: { fontSize: 14, color: 'var(--text-secondary)', marginTop: 8, lineHeight: 1.5 },
   input: {
     flex: 1,
     background: 'var(--surface-raised)',
@@ -332,39 +515,80 @@ const styles = {
     fontWeight: 600,
     fontSize: 14,
   },
-  authError: { fontSize: 13, color: 'var(--red)', marginTop: 12 },
-  page: { maxWidth: 520, margin: '0 auto', padding: '28px 18px 60px', display: 'flex', flexDirection: 'column', gap: 16 },
-  eyebrow: { fontSize: 12, letterSpacing: 1, textTransform: 'uppercase', color: 'var(--accent)', fontWeight: 600 },
-  h1: { fontSize: 22, fontWeight: 700 },
-  backBtn: {
+  ghostBtn: {
     background: 'transparent',
-    border: 'none',
     color: 'var(--text-secondary)',
+    border: '1px solid var(--border)',
+    borderRadius: 'var(--radius-sm)',
+    padding: '8px 14px',
     fontSize: 13,
-    alignSelf: 'flex-start',
-    padding: 0,
   },
-  errorBar: { background: 'var(--red-dim)', color: 'var(--red)', padding: '10px 14px', borderRadius: 'var(--radius-sm)', fontSize: 13 },
-  loadingText: { fontSize: 13, color: 'var(--text-muted)' },
-  statsRow: { display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 8 },
+  page: {
+    maxWidth: 480,
+    margin: '0 auto',
+    padding: '28px 18px 60px',
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 16,
+  },
+  header: { display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' },
+  eyebrow: { fontSize: 12, letterSpacing: 1, textTransform: 'uppercase', color: 'var(--accent)', fontWeight: 600 },
+  h1: { fontSize: 22, fontWeight: 700, marginTop: 4 },
+  errorBar: {
+    background: 'var(--red-dim)',
+    color: 'var(--red)',
+    padding: '10px 14px',
+    borderRadius: 'var(--radius-sm)',
+    fontSize: 13,
+  },
+  statsRow: { display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 10 },
   statCard: {
     background: 'var(--surface)',
     border: '1px solid var(--border)',
     borderRadius: 'var(--radius)',
-    padding: '14px 6px',
+    padding: '16px 10px',
     display: 'flex',
     flexDirection: 'column',
     alignItems: 'center',
     gap: 4,
   },
-  statValue: { fontSize: 18, fontWeight: 700 },
-  statLabel: { fontSize: 10, color: 'var(--text-muted)', textAlign: 'center' },
-  card: { background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 'var(--radius)', padding: 18 },
-  sectionLabel: { fontSize: 13, fontWeight: 600, color: 'var(--text-secondary)' },
-  memberRow: {
+  statValue: { fontSize: 22, fontWeight: 700 },
+  statLabel: { fontSize: 11, color: 'var(--text-muted)', textAlign: 'center' },
+  card: {
+    background: 'var(--surface)',
+    border: '1px solid var(--border)',
+    borderRadius: 'var(--radius)',
+    padding: 18,
+  },
+  calHeader: { display: 'flex', alignItems: 'center', justifyContent: 'space-between' },
+  navBtn: {
+    background: 'var(--surface-raised)',
+    border: '1px solid var(--border)',
+    borderRadius: 'var(--radius-sm)',
+    width: 32,
+    height: 32,
+    color: 'var(--text-primary)',
+    fontSize: 16,
+  },
+  calTitle: { fontSize: 15, fontWeight: 600 },
+  weekDays: { display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', marginTop: 16 },
+  weekDayLabel: { fontSize: 11, color: 'var(--text-muted)', textAlign: 'center' },
+  grid: { display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', gap: 4, marginTop: 8 },
+  dayCell: {
+    aspectRatio: '1',
+    borderRadius: 'var(--radius-sm)',
+    fontSize: 13,
+    fontWeight: 500,
+    background: 'transparent',
+  },
+  legend: { display: 'flex', flexWrap: 'wrap', gap: 12, marginTop: 16 },
+  dayHeaderRow: { display: 'flex', justifyContent: 'space-between', alignItems: 'center' },
+  dayHeaderTitle: { fontSize: 15, fontWeight: 600 },
+  scoreBadge: { fontSize: 13, fontWeight: 600, padding: '4px 10px', borderRadius: 999 },
+  habitRow: {
     display: 'flex',
-    justifyContent: 'space-between',
     alignItems: 'center',
+    gap: 12,
     background: 'var(--surface-raised)',
     border: '1px solid var(--border)',
     borderRadius: 'var(--radius-sm)',
@@ -372,14 +596,33 @@ const styles = {
     color: 'var(--text-primary)',
     textAlign: 'left',
   },
-  warnBadge: {
-    fontSize: 11,
-    fontWeight: 600,
-    color: 'var(--amber)',
-    background: 'var(--amber-dim)',
-    padding: '3px 8px',
-    borderRadius: 999,
+  checkbox: {
+    width: 20,
+    height: 20,
+    borderRadius: 6,
+    border: '2px solid var(--border-strong)',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    flexShrink: 0,
   },
-  entryRow: { display: 'flex', justifyContent: 'space-between', padding: '6px 0', borderBottom: '1px solid var(--border)' },
-  nnCard: { background: 'var(--surface-raised)', border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)', padding: 12 },
+  hitTarget: { marginTop: 14, fontSize: 13, color: 'var(--accent)', fontWeight: 500 },
+  futureLockNote: { marginTop: 14, fontSize: 13, color: 'var(--text-muted)', fontStyle: 'italic' },
+  weeklyLabel: { fontSize: 13, fontWeight: 600, color: 'var(--text-secondary)' },
+  weeklySub: { fontSize: 15, fontWeight: 600, marginTop: 4 },
+  textarea: {
+    width: '100%',
+    marginTop: 12,
+    background: 'var(--surface-raised)',
+    border: '1px solid var(--border-strong)',
+    borderRadius: 'var(--radius-sm)',
+    padding: 12,
+    color: 'var(--text-primary)',
+    fontSize: 14,
+    resize: 'vertical',
+    outline: 'none',
+  },
+  loadingText: { fontSize: 13, color: 'var(--text-muted)', textAlign: 'center' },
+  footer: { textAlign: 'center', marginTop: 8 },
+  adminLink: { fontSize: 13, color: 'var(--text-muted)', textDecoration: 'none' },
 };
